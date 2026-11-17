@@ -93,6 +93,7 @@ object AiOcr {
     fun defaultModel(provider: String) = when (provider) {
         "claude" -> "claude-sonnet-5-5"
         "mistral" -> "mistral-small-latest"
+        "groq" -> "meta-llama/llama-4-scout-17b-16e-instruct"
         else -> "gemini-2.5-flash"
     }
 
@@ -130,6 +131,7 @@ object AiOcr {
             when (c.provider) {
                 "claude" -> claudeImage(c, b64, prompt)
                 "mistral" -> mistralImage(c, b64, prompt)
+                "groq" -> groqImage(c, b64, prompt)
                 else -> geminiImage(c, b64, prompt)
             }
         }
@@ -140,12 +142,13 @@ object AiOcr {
         withModelFix(cfg, onModelFixed) { c -> pingOnce(c) }
 
     private fun pingOnce(cfg: Cfg): String =
-        if (cfg.provider == "mistral") {
+        if (cfg.provider == "mistral" || cfg.provider == "groq") {
             val body = JSONObject().put("model", cfg.model).put("max_tokens", 10).put(
                 "messages",
                 JSONArray().put(JSONObject().put("role", "user").put("content", "Réponds seulement : OK"))
             )
-            mistralText(post(MISTRAL_URL, mistralHeaders(cfg), body, cfg))
+            val url = if (cfg.provider == "groq") GROQ_URL else MISTRAL_URL
+            mistralText(post(url, mistralHeaders(cfg), body, cfg))
         } else if (cfg.provider == "claude") {
             val body = JSONObject().put("model", cfg.model).put("max_tokens", 10).put(
                 "messages",
@@ -167,6 +170,24 @@ object AiOcr {
     // ------------------------------------------------------------------ Mistral
 
     private const val MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+
+    private const val GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+    private fun groqImage(cfg: Cfg, b64: String, prompt: String): String {
+        val content = JSONArray()
+            .put(JSONObject().put("type", "text").put("text", prompt))
+            .put(
+                JSONObject().put("type", "image_url").put(
+                    "image_url", JSONObject().put("url", "data:image/jpeg;base64,$b64")
+                )
+            )
+        val body = JSONObject()
+            .put("model", cfg.model)
+            .put("max_tokens", 1500)
+            .put("temperature", 0.1)
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+        return mistralText(post(GROQ_URL, mistralHeaders(cfg), body, cfg))
+    }
 
     private fun mistralHeaders(cfg: Cfg) = mapOf("Authorization" to "Bearer ${cfg.key}")
 

@@ -167,7 +167,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(24), 0, 0)
         })
         val providers = listOf(
-            "Mistral (France) — gratuit" to "mistral",
+            "Groq (Llama) — gratuit" to "groq",
             "Gemini (Google) — gratuit" to "gemini",
             "Claude (Anthropic) — payant" to "claude"
         )
@@ -181,10 +181,9 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT
         }
         fun loadProvider() {
-            helpView.text = if (curProv == "mistral") {
-                "Clé gratuite, sans carte bancaire (un numéro de téléphone suffit) : console.mistral.ai, " +
-                    "choisir le plan « Experiment », puis API Keys. Mistral peut utiliser les images envoyées " +
-                    "pour entraîner ses modèles (désactivable dans les réglages du compte)."
+            helpView.text = if (curProv == "groq") {
+                "Clé gratuite, sans carte bancaire : console.groq.com (connexion par e-mail ou Google) > API Keys > " +
+                    "Create API Key. Quota gratuit d'environ 30 requêtes par minute."
             } else if (curProv == "gemini") {
                 "Clé gratuite, sans carte bancaire : aistudio.google.com > Get API key. " +
                     "Quota gratuit limité (quelques requêtes par minute). Google peut utiliser les images envoyées."
