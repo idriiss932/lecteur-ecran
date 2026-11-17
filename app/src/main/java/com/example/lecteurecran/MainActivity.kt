@@ -62,6 +62,8 @@ class MainActivity : Activity() {
     private var notifAsked = false
     private var tts: TextToSpeech? = null
     private var voiceList: List<Voice> = emptyList()
+    private lateinit var engineSpinner: Spinner
+    private var engineList: List<TextToSpeech.EngineInfo> = emptyList()
     private lateinit var updateBtn: Button
     private var pendingUrl: String? = null
     private var downloading = false
@@ -110,6 +112,26 @@ class MainActivity : Activity() {
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
         col.addView(langSpinner)
+
+        // ---- moteur vocal
+        col.addView(TextView(this).apply {
+            text = "Moteur vocal (conseillé : Synthèse vocale Google)"; textSize = 14f
+            setPadding(0, dp(16), 0, 0)
+        })
+        engineSpinner = Spinner(this)
+        engineSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                val wanted = if (pos == 0) null else engineList.getOrNull(pos - 1)?.name
+                if (wanted != prefs.getString("engine", null)) {
+                    val e = prefs.edit()
+                    if (wanted == null) e.remove("engine") else e.putString("engine", wanted)
+                    e.remove("voice").apply()
+                    createTts()
+                }
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        col.addView(engineSpinner)
 
         // ---- voix
         col.addView(TextView(this).apply {
@@ -176,9 +198,7 @@ class MainActivity : Activity() {
 
         setContentView(ScrollView(this).apply { addView(col) })
 
-        tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) refreshVoices()
-        }
+        createTts()
         checkUpdate(false)
     }
 
@@ -195,6 +215,33 @@ class MainActivity : Activity() {
     }
 
     // ---------------------------------------------------------------- voix
+
+    private fun createTts() {
+        tts?.shutdown()
+        tts = null
+        val engine = prefs.getString("engine", null)
+        val listener = TextToSpeech.OnInitListener { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                refreshEngines()
+                refreshVoices()
+            } else if (engine != null) {
+                prefs.edit().remove("engine").remove("voice").apply()
+                toast("Ce moteur vocal ne répond pas, retour au moteur par défaut")
+                createTts()
+            }
+        }
+        tts = if (engine == null) TextToSpeech(this, listener) else TextToSpeech(this, listener, engine)
+    }
+
+    private fun refreshEngines() {
+        val t = tts ?: return
+        engineList = try { t.engines } catch (e: Exception) { emptyList() }
+        val labels = listOf("Moteur par défaut du téléphone") + engineList.map { it.label }
+        engineSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+        val cur = prefs.getString("engine", null)
+        val idx = engineList.indexOfFirst { it.name == cur }
+        engineSpinner.setSelection(if (idx >= 0) idx + 1 else 0)
+    }
 
     private fun refreshVoices() {
         val t = tts ?: return

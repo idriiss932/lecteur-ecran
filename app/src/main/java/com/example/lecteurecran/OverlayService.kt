@@ -462,7 +462,7 @@ class OverlayService : Service() {
     // ---------------------------------------------------------------- voix
 
     private fun initTts() {
-        tts = TextToSpeech(this) { status ->
+        val listener = TextToSpeech.OnInitListener { status ->
             ttsReady = status == TextToSpeech.SUCCESS
             if (ttsReady) {
                 tts?.setOnUtteranceProgressListener(progressListener)
@@ -470,6 +470,8 @@ class OverlayService : Service() {
                 toast("Synthèse vocale indisponible")
             }
         }
+        val engine = prefs.getString("engine", null)
+        tts = if (engine == null) TextToSpeech(this, listener) else TextToSpeech(this, listener, engine)
     }
 
     private val progressListener: UtteranceProgressListener =
@@ -555,12 +557,17 @@ class OverlayService : Service() {
         picker?.setHighlight(emptyList())
     }
 
-    /** Recolle les lignes d'un bloc en phrases fluides pour la voix. */
-    private fun clean(s: String): String =
-        s.replace(Regex("(?<=\\p{L})-\\n(?=\\p{Ll})"), "")
+    /** Prépare le texte OCR pour la voix : recolle les lignes, enlève les parasites, dé-épelle les MAJUSCULES. */
+    private fun clean(s: String): String {
+        var t = s.replace(Regex("(?<=\\p{L})-\\n(?=\\p{Ll})"), "")
+            .replace(Regex("[|_~^<>{}\\[\\]#*\\\\]"), " ")
             .replace(Regex("\\s*\\n\\s*"), " ")
             .replace(Regex("\\s{2,}"), " ")
             .trim()
+        // Les mots TOUT EN MAJUSCULES (typiques des BD) sont épelés lettre par lettre par certaines voix
+        t = Regex("\\p{Lu}{2,}").replace(t) { it.value.lowercase() }
+        return t
+    }
 
     private fun chunk(s: String): List<String> {
         val max = 3000
