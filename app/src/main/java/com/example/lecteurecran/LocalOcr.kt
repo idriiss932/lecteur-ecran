@@ -19,19 +19,37 @@ import kotlin.math.min
  */
 object LocalOcr {
 
+    private fun norm(t: String) = t.lowercase().filter { it.isLetter() }
+
     fun read(rec: TextRecognizer, crop: Bitmap, hint: String, centerOnly: Boolean): String {
         val cands = mutableListOf<String>()
         if (hint.isNotBlank()) cands.add(hint)
-        for (v in variants(crop)) {
+        // Les prétraitements sont lancés un par un : on s'arrête dès que deux lectures indépendantes
+        // sont d'accord (rapide quand le texte est facile, plus d'essais seulement si besoin).
+        val makers = listOf<() -> Bitmap>(
+            { autoLevels(scaleTo(crop, 2f)) },
+            { scaleTo(crop, 2f) },
+            { binarize(scaleTo(crop, 3f)) }
+        )
+        var tries = 0
+        for (mk in makers) {
+            val v = mk()
             try {
                 val res = Tasks.await(rec.process(InputImage.fromBitmap(v, 0)))
                 val t = pick(res, v.width / 2, v.height / 2, centerOnly)
-                if (t.isNotBlank()) cands.add(t)
+                if (t.isNotBlank()) {
+                    cands.add(t)
+                    val n = norm(t)
+                    if (n.length >= 3 && cands.size >= 2 && cands.dropLast(1).any { norm(it) == n }) {
+                        v.recycle()
+                        break
+                    }
+                }
             } catch (e: Exception) {
                 // variante ignorée
-            } finally {
-                v.recycle()
             }
+            v.recycle()
+            tries++
         }
         val best = cands.maxByOrNull { score(it) } ?: return ""
         return fixConfusions(best)
@@ -56,14 +74,6 @@ object LocalOcr {
     }
 
     // ------------------------------------------------------------------ prétraitements
-
-    private fun variants(src: Bitmap): List<Bitmap> {
-        val out = mutableListOf<Bitmap>()
-        out.add(scaleTo(src, 2f))
-        out.add(autoLevels(scaleTo(src, 2f)))
-        out.add(binarize(scaleTo(src, 3f)))
-        return out
-    }
 
     /** Toujours une nouvelle image (jamais l'originale). */
     private fun scaleTo(src: Bitmap, k: Float): Bitmap {

@@ -27,7 +27,7 @@ data class OcrBlock(val text: String, val rect: Rect, val lines: List<OcrLine>)
 class PickerView(
     context: Context,
     private val frozen: Bitmap,
-    private val blocks: List<OcrBlock>,
+    private var blocks: List<OcrBlock>,
     private val onRead: (hint: String, rects: List<Rect>, region: Rect, whole: Boolean) -> Unit
 ) : View(context) {
 
@@ -54,6 +54,11 @@ class PickerView(
     private var dragging = false
     private val loc = IntArray(2)
     private val tmp = RectF()
+
+    fun setBlocks(b: List<OcrBlock>) {
+        blocks = b
+        invalidate()
+    }
 
     fun setHighlight(rects: List<Rect>) {
         highlight = rects

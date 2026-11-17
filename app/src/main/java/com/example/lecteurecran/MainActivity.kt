@@ -277,14 +277,14 @@ class MainActivity : Activity() {
         })
 
         col.addView(TextView(this).apply {
-            text = "Ignorer le haut de l'écran (barre d'adresse du navigateur) : ${prefs.getInt("ignore_top_dp", 0)} dp"
+            text = "Ignorer le haut de l'écran (barre d'adresse du navigateur) : ${prefs.getInt("ignore_top_dp", 56)} dp"
             textSize = 14f
             setPadding(0, dp(16), 0, 0)
             tag = "ignoreLabel"
         })
         col.addView(SeekBar(this).apply {
             max = 200
-            progress = prefs.getInt("ignore_top_dp", 0)
+            progress = prefs.getInt("ignore_top_dp", 56)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
                     prefs.edit().putInt("ignore_top_dp", p).apply()

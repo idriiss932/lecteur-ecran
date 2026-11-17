@@ -137,6 +137,77 @@ object AiOcr {
         }
     }
 
+
+    class PageItem(val text: String, val box: android.graphics.Rect)
+
+    /**
+     * UNE seule requête pour toute la page : l'IA repère les bulles (avec leur position) et les transcrit.
+     * Économise le quota gratuit et rend ensuite les touches instantanées.
+     * [bmp] est une copie qui appartient à cette fonction (elle est recyclée ici).
+     */
+    fun readPage(
+        cfg: Cfg, bmp: Bitmap, top: Int, langName: String,
+        onModelFixed: (String) -> Unit = {}
+    ): List<PageItem> {
+        val t = top.coerceIn(0, bmp.height / 2)
+        val crop = Bitmap.createBitmap(bmp, 0, t, bmp.width, bmp.height - t)
+        val w = crop.width
+        val h = crop.height
+        var img = crop
+        val maxSide = 1800
+        if (max(w, h) > maxSide) {
+            val k = maxSide.toFloat() / max(w, h)
+            img = Bitmap.createScaledBitmap(crop, (w * k).toInt(), (h * k).toInt(), true)
+        }
+        val out = ByteArrayOutputStream()
+        img.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        if (img !== crop) img.recycle()
+        crop.recycle()
+        if (!bmp.isRecycled) bmp.recycle()
+        val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+
+        val prompt = "Tu analyses une capture d'écran d'une page de BD en $langName. " +
+            "Repère chaque bulle de dialogue, de pensée, cartouche de narration ou légende à lire à voix haute, " +
+            "et transcris-la fidèlement : les polices de BD sont stylisées, lis bien chaque mot et corrige " +
+            "les confusions de lettres. " +
+            "IGNORE : l'heure, la batterie et la barre d'état, la barre d'adresse, les onglets et boutons du " +
+            "navigateur ou de l'appli, les publicités, les logos et filigranes de sites, les onomatopées dessinées. " +
+            "Donne les éléments dans l'ordre de lecture de la page. " +
+            "Réponds uniquement par un tableau JSON : [{\"box_2d\": [ymin, xmin, ymax, xmax], \"text\": \"...\"}] " +
+            "où box_2d entoure exactement la bulle, en coordonnées normalisées de 0 à 1000. " +
+            "Le texte est en casse normale (pas de MAJUSCULES inutiles), sans guillemets. " +
+            "S'il n'y a aucun texte à lire : []."
+
+        val raw = withModelFix(cfg, onModelFixed) { c -> geminiImage(c, b64, prompt, true) }
+        var s = raw.trim()
+        if (s.startsWith("```")) s = s.removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+        val arr = try {
+            JSONArray(s)
+        } catch (e: Exception) {
+            try {
+                val o = JSONObject(s)
+                o.optJSONArray(o.keys().asSequence().firstOrNull() ?: "") ?: throw e
+            } catch (e2: Exception) {
+                throw RuntimeException("réponse de l'IA illisible")
+            }
+        }
+        val items = mutableListOf<PageItem>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val text = o.optString("text").trim()
+            val b = o.optJSONArray("box_2d") ?: continue
+            if (text.isBlank() || b.length() < 4) continue
+            val y1 = b.optDouble(0); val x1 = b.optDouble(1); val y2 = b.optDouble(2); val x2 = b.optDouble(3)
+            val l = (minOf(x1, x2) / 1000.0 * w).toInt().coerceIn(0, w)
+            val r = (maxOf(x1, x2) / 1000.0 * w).toInt().coerceIn(0, w)
+            val tp = t + (minOf(y1, y2) / 1000.0 * h).toInt().coerceIn(0, h)
+            val bt = t + (maxOf(y1, y2) / 1000.0 * h).toInt().coerceIn(0, h)
+            if (r - l < 6 || bt - tp < 6) continue
+            items.add(PageItem(text, android.graphics.Rect(l, tp, r, bt)))
+        }
+        return items
+    }
+
     /** Petit appel de test pour vérifier la clé et le modèle. */
     fun ping(cfg: Cfg, onModelFixed: (String) -> Unit = {}): String =
         withModelFix(cfg, onModelFixed) { c -> pingOnce(c) }
@@ -255,7 +326,7 @@ object AiOcr {
 
     private fun geminiHeaders(cfg: Cfg) = mapOf("x-goog-api-key" to cfg.key)
 
-    private fun geminiImage(cfg: Cfg, b64: String, prompt: String): String {
+    private fun geminiImage(cfg: Cfg, b64: String, prompt: String, json: Boolean = false): String {
         val parts = JSONArray()
             .put(
                 JSONObject().put(
@@ -265,6 +336,7 @@ object AiOcr {
             )
             .put(JSONObject().put("text", prompt))
         val gen = JSONObject().put("temperature", 0.1).put("maxOutputTokens", 8000)
+        if (json) gen.put("responseMimeType", "application/json")
         // Modèles 2.5 Flash : pas de « réflexion » (plus rapide, et ne mange pas la limite de sortie)
         if (cfg.model.contains("2.5") && cfg.model.contains("flash")) {
             gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))

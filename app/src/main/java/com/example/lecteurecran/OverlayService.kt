@@ -95,6 +95,16 @@ class OverlayService : Service() {
     private var aiBusy = false
     private val aiPool = Executors.newFixedThreadPool(4)
 
+    // Lecture de page par l'IA (une requête par page)
+    private var pageGen = 0
+    private var pagePending = false
+    private var pageDone = false
+    private var pageFailed = false
+    private var pageItems: List<OcrBlock> = emptyList()
+    private var queuedRegion: Rect? = null
+    private var queuedWhole = false
+    private var queuedAll = false
+
     private class AiJob(val hint: String, val rects: List<Rect>, val region: Rect, val whole: Boolean)
 
     private val recognizer by lazy {
@@ -354,6 +364,7 @@ class OverlayService : Service() {
         busy = true
         stopSpeaking()
         closePicker()
+        pageFailed = false
         bubble?.visibility = View.INVISIBLE // pour que la bulle n'apparaisse pas dans la capture
         // Laisse le temps à une nouvelle image (sans bulle) d'arriver
         main.postDelayed({
@@ -395,12 +406,12 @@ class OverlayService : Service() {
             )
         }
         if (blocks.isEmpty()) {
-            if (aiConfig() == null) {
+            if (!pageMode()) {
                 bmp.recycle()
                 toast("Aucun texte détecté")
                 return
             }
-            toast("Touche une bulle ou entoure-la : l'IA la lira")
+            toast("L'IA lit la page…")
         }
         pickerBitmap = bmp
         pickerBlocks = blocks
@@ -437,7 +448,96 @@ class OverlayService : Service() {
         lp.x = 0
         lp.y = 0
         wm.addView(root, lp)
-        toast("Touche un bloc de texte (ou entoure une zone)")
+        if (pageMode()) {
+            startPageAnalysis(bmp)
+            toast("L'IA lit la page (quelques secondes)…")
+        } else {
+            toast("Touche un bloc de texte (ou entoure une zone)")
+        }
+    }
+
+    /** Mode « page » : une seule requête Gemini repère et transcrit toutes les bulles. */
+    private fun pageMode(): Boolean {
+        val c = aiConfig() ?: return false
+        return c.provider == "gemini" && !pageFailed
+    }
+
+    private fun startPageAnalysis(bmp: Bitmap) {
+        val cfg = aiConfig() ?: return
+        val gen = ++pageGen
+        pagePending = true
+        pageDone = false
+        pageFailed = false
+        pageItems = emptyList()
+        queuedRegion = null
+        queuedWhole = false
+        queuedAll = false
+        val copy = bmp.copy(Bitmap.Config.ARGB_8888, false) ?: return
+        val top = topCut()
+        val lang = langName()
+        Thread {
+            var items: List<AiOcr.PageItem>? = null
+            var err: String? = null
+            try {
+                items = AiOcr.readPage(cfg, copy, top, lang) { m ->
+                    prefs.edit().putString("model_${cfg.provider}", m).apply()
+                }
+            } catch (e: Exception) {
+                err = e.message ?: "erreur réseau"
+            }
+            main.post {
+                if (gen != pageGen) return@post
+                pagePending = false
+                if (items != null) {
+                    pageDone = true
+                    val blocks = items.map {
+                        OcrBlock(it.text, it.box, listOf(OcrLine(it.text, it.box)))
+                    }
+                    pageItems = blocks
+                    pickerBlocks = blocks
+                    picker?.setBlocks(blocks)
+                    if (blocks.isEmpty()) toast("L'IA ne voit pas de texte à lire")
+                    else toast("Page lue ✓ Touche une bulle")
+                    runQueued()
+                } else {
+                    pageFailed = true
+                    toast("IA : $err → lecture locale")
+                    runQueued()
+                }
+            }
+        }.start()
+    }
+
+    /** Exécute la demande faite pendant que l'IA lisait la page. */
+    private fun runQueued() {
+        val region = queuedRegion
+        val all = queuedAll
+        val whole = queuedWhole
+        queuedRegion = null
+        queuedAll = false
+        queuedWhole = false
+        if (all) readAll()
+        else if (region != null) onPickerRead("", listOf(region), region, whole)
+    }
+
+    /** Textes de la page lue par l'IA correspondant à une zone touchée ou entourée. */
+    private fun fromPage(region: Rect, whole: Boolean): List<OcrBlock> {
+        if (whole) {
+            return pageItems.filter { region.contains(it.rect.centerX(), it.rect.centerY()) }
+        }
+        var best: OcrBlock? = null
+        var bestA = 0L
+        for (b in pageItems) {
+            val r = Rect()
+            if (r.setIntersect(b.rect, region)) {
+                val a = r.width().toLong() * r.height()
+                if (a > bestA) {
+                    bestA = a
+                    best = b
+                }
+            }
+        }
+        return listOfNotNull(best)
     }
 
     private fun pill(label: String, onClick: () -> Unit): TextView =
@@ -468,6 +568,12 @@ class OverlayService : Service() {
         pickerRoot = null
         picker = null
         pickerBlocks = emptyList()
+        pageGen++
+        pagePending = false
+        pageDone = false
+        pageItems = emptyList()
+        queuedRegion = null
+        queuedAll = false
         pickerBitmap?.recycle()
         pickerBitmap = null
     }
@@ -531,7 +637,7 @@ class OverlayService : Service() {
     private fun topCut(): Int {
         val id = resources.getIdentifier("status_bar_height", "dimen", "android")
         val status = if (id > 0) resources.getDimensionPixelSize(id) else (28 * dp).toInt()
-        return status + (prefs.getInt("ignore_top_dp", 0) * dp).toInt()
+        return status + (prefs.getInt("ignore_top_dp", 56) * dp).toInt()
     }
 
     private fun aiConfig(): AiOcr.Cfg? {
@@ -553,7 +659,25 @@ class OverlayService : Service() {
             return
         }
         currentText = id
-        if (aiConfig() == null) {
+        if (pageMode()) {
+            if (pagePending) {
+                queuedRegion = region
+                queuedWhole = whole
+                queuedAll = false
+                toast("L'IA lit la page… ta bulle sera lue dès que c'est prêt")
+                return
+            }
+            if (pageDone) {
+                val found = fromPage(region, whole)
+                if (found.isNotEmpty()) {
+                    stopSpeaking()
+                    speakItems(found.map { it.text to listOf(it.rect) })
+                    return
+                }
+            }
+            // Rien trouvé par l'IA ici : lecture locale de la zone
+            localRefineThenSpeak(listOf(AiJob(hint, rects, region, whole)))
+        } else if (aiConfig() == null || pageFailed) {
             localRefineThenSpeak(listOf(AiJob(hint, rects, region, whole)))
         } else {
             transcribeThenSpeak(listOf(AiJob(hint, rects, region, whole)))
@@ -566,7 +690,20 @@ class OverlayService : Service() {
             toast("Lecture IA en cours…")
             return
         }
-        if (aiConfig() == null) {
+        if (pageMode()) {
+            if (pagePending) {
+                queuedAll = true
+                queuedRegion = null
+                toast("L'IA lit la page… la lecture démarrera dès que c'est prêt")
+                return
+            }
+            if (pageDone && pageItems.isNotEmpty()) {
+                stopSpeaking()
+                speakItems(pageItems.map { it.text to listOf(it.rect) })
+            } else {
+                toast("Aucun texte trouvé par l'IA")
+            }
+        } else if (aiConfig() == null || pageFailed) {
             localRefineThenSpeak(pickerBlocks.map { AiJob(it.text, listOf(it.rect), it.rect, false) })
         } else {
             // Une seule requête pour toute la page (économise le quota gratuit)
@@ -606,17 +743,24 @@ class OverlayService : Service() {
         toast("Lecture en cours…")
         aiBusy = true
         Thread {
-            val results = jobs.mapIndexed { i, job ->
-                val crop = crops[i]
-                try {
-                    if (crop == null) null
-                    else LocalOcr.read(recognizer, crop, job.hint, job.hint.isBlank() && !job.whole)
-                } catch (e: Exception) {
-                    null
-                } finally {
-                    crop?.recycle()
+            val results = arrayOfNulls<String>(jobs.size)
+            val latch = CountDownLatch(jobs.size)
+            jobs.forEachIndexed { i, job ->
+                aiPool.execute {
+                    val crop = crops[i]
+                    try {
+                        if (crop != null) {
+                            results[i] = LocalOcr.read(recognizer, crop, job.hint, job.hint.isBlank() && !job.whole)
+                        }
+                    } catch (e: Exception) {
+                        // lecture ignorée : on gardera le texte brut
+                    } finally {
+                        crop?.recycle()
+                        latch.countDown()
+                    }
                 }
             }
+            latch.await()
             main.post {
                 aiBusy = false
                 val items = jobs.mapIndexed { i, job ->
