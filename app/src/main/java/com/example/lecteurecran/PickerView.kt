@@ -28,7 +28,7 @@ class PickerView(
     context: Context,
     private val frozen: Bitmap,
     private val blocks: List<OcrBlock>,
-    private val onRead: (text: String, rects: List<Rect>) -> Unit
+    private val onRead: (hint: String, rects: List<Rect>, region: Rect, whole: Boolean) -> Unit
 ) : View(context) {
 
     private val dp = resources.displayMetrics.density
@@ -121,10 +121,13 @@ class PickerView(
                 r.contains(sx, sy)
             }
             .minByOrNull { it.rect.width().toLong() * it.rect.height() }
-        if (hit == null) {
-            Toast.makeText(context, "Aucun texte ici", Toast.LENGTH_SHORT).show()
+        if (hit != null) {
+            onRead(hit.text, listOf(hit.rect), hit.rect, false)
         } else {
-            onRead(hit.text, listOf(hit.rect))
+            // Rien détecté localement : on laisse l'IA lire la bulle autour du doigt
+            val half = (130 * dp).toInt()
+            val region = Rect(sx - half, sy - half, sx + half, sy + half)
+            onRead("", listOf(region), region, false)
         }
     }
 
@@ -132,13 +135,15 @@ class PickerView(
         getLocationOnScreen(loc)
         val area = RectF(sel)
         area.offset(loc[0].toFloat(), loc[1].toFloat())
+        val region = Rect(area.left.toInt(), area.top.toInt(), area.right.toInt(), area.bottom.toInt())
         val lines = blocks.flatMap { it.lines }.filter {
             area.contains(it.rect.centerX().toFloat(), it.rect.centerY().toFloat())
         }
-        if (lines.isEmpty()) {
-            Toast.makeText(context, "Aucun texte dans cette zone", Toast.LENGTH_SHORT).show()
-        } else {
-            onRead(lines.joinToString("\n") { it.text }, lines.map { it.rect })
-        }
+        onRead(
+            lines.joinToString("\n") { it.text },
+            if (lines.isEmpty()) listOf(region) else lines.map { it.rect },
+            region,
+            true
+        )
     }
 }

@@ -16,7 +16,11 @@ import android.speech.tts.Voice
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -154,6 +158,67 @@ class MainActivity : Activity() {
         col.addView(Button(this).apply {
             text = "Installer / améliorer les voix"
             setOnClickListener { openTtsSettings() }
+        })
+
+        // ---- lecture par IA
+        col.addView(TextView(this).apply {
+            text = "Lecture du texte par IA (recommandé pour les BD)"
+            textSize = 16f
+            setPadding(0, dp(24), 0, 0)
+        })
+        col.addView(TextView(this).apply {
+            text = "Colle ta clé API Claude (console.anthropic.com > API keys). Sans clé, l'appli utilise la lecture locale, moins précise."
+            textSize = 12f
+        })
+        col.addView(EditText(this).apply {
+            hint = "sk-ant-..."
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(prefs.getString("ai_key", ""))
+            addTextChangedListener(object : TextWatcher {
+                override fun afterTextChanged(e: Editable?) {
+                    prefs.edit().putString("ai_key", e?.toString()?.trim() ?: "").apply()
+                }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        })
+        val models = listOf(
+            "Précis (Sonnet) — conseillé" to AiOcr.MODEL_PRECISE,
+            "Rapide et économique (Haiku)" to AiOcr.MODEL_FAST
+        )
+        val modelSpinner = Spinner(this)
+        modelSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, models.map { it.first }
+        )
+        modelSpinner.setSelection(
+            models.indexOfFirst { it.second == prefs.getString("ai_model", AiOcr.MODEL_PRECISE) }.coerceAtLeast(0)
+        )
+        modelSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                prefs.edit().putString("ai_model", models[pos].second).apply()
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        col.addView(modelSpinner)
+        col.addView(Button(this).apply {
+            text = "Tester la clé"
+            setOnClickListener {
+                val key = prefs.getString("ai_key", "")?.trim().orEmpty()
+                val model = prefs.getString("ai_model", AiOcr.MODEL_PRECISE) ?: AiOcr.MODEL_PRECISE
+                if (key.isEmpty()) {
+                    toast("Colle d'abord ta clé")
+                } else {
+                    toast("Test en cours…")
+                    Thread {
+                        val msg = try {
+                            "Clé valable : l'IA répond « ${AiOcr.ping(key, model)} »"
+                        } catch (e: Exception) {
+                            "Échec : ${e.message}"
+                        }
+                        runOnUiThread { toast(msg) }
+                    }.start()
+                }
+            }
         })
 
         // ---- vitesse

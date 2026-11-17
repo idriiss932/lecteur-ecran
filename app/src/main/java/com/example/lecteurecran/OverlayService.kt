@@ -43,6 +43,8 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import kotlin.math.abs
 
 /**
@@ -90,6 +92,10 @@ class OverlayService : Service() {
     @Volatile private var lastUtteranceId: String? = null
     private var speaking = false
     private var currentText: String? = null
+    private var aiBusy = false
+    private val aiPool = Executors.newFixedThreadPool(4)
+
+    private class AiJob(val hint: String, val rects: List<Rect>, val region: Rect, val whole: Boolean)
 
     private val recognizer by lazy {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -387,14 +393,19 @@ class OverlayService : Service() {
             )
         }
         if (blocks.isEmpty()) {
-            bmp.recycle()
-            toast("Aucun texte détecté")
-            return
+            if (aiKey() == null) {
+                bmp.recycle()
+                toast("Aucun texte détecté")
+                return
+            }
+            toast("Touche une bulle ou entoure-la : l'IA la lira")
         }
         pickerBitmap = bmp
         pickerBlocks = blocks
 
-        val view = PickerView(this, bmp, blocks) { text, rects -> onPickerRead(text, rects) }
+        val view = PickerView(this, bmp, blocks) { hint, rects, region, whole ->
+            onPickerRead(hint, rects, region, whole)
+        }
         picker = view
 
         val root = FrameLayout(this)
@@ -514,18 +525,98 @@ class OverlayService : Service() {
         t.setSpeechRate(prefs.getFloat("rate", 1f))
     }
 
-    private fun onPickerRead(text: String, rects: List<Rect>) {
-        if (speaking && text == currentText) { // re-toucher le même bloc = stop
+    private fun aiKey(): String? = prefs.getString("ai_key", null)?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun onPickerRead(hint: String, rects: List<Rect>, region: Rect, whole: Boolean) {
+        if (aiBusy) {
+            toast("Lecture IA en cours…")
+            return
+        }
+        val id = region.toShortString()
+        if (speaking && id == currentText) { // re-toucher la même zone = stop
             stopSpeaking()
             return
         }
-        currentText = text
-        speakItems(listOf(text to rects))
+        currentText = id
+        if (aiKey() == null) {
+            if (hint.isBlank()) toast("Aucun texte ici. Entoure la bulle avec le doigt.")
+            else speakItems(listOf(hint to rects))
+        } else {
+            transcribeThenSpeak(listOf(AiJob(hint, rects, region, whole)))
+        }
     }
 
     private fun readAll() {
         currentText = null
-        speakItems(pickerBlocks.map { it.text to listOf(it.rect) })
+        if (aiBusy) {
+            toast("Lecture IA en cours…")
+            return
+        }
+        if (aiKey() == null) {
+            speakItems(pickerBlocks.map { it.text to listOf(it.rect) })
+        } else {
+            transcribeThenSpeak(pickerBlocks.map { AiJob(it.text, listOf(it.rect), it.rect, false) })
+        }
+    }
+
+    /** Découpe la zone dans l'image figée (sur le thread principal). */
+    private fun cropFor(job: AiJob): Bitmap? {
+        val bmp = pickerBitmap ?: return null
+        val r = Rect(job.region)
+        if (!job.whole) {
+            val dx = (r.width() * 0.35f).toInt() + (12 * dp).toInt()
+            val dy = (r.height() * 0.35f).toInt() + (12 * dp).toInt()
+            r.inset(-dx, -dy)
+        }
+        if (!r.intersect(0, 0, bmp.width, bmp.height)) return null
+        if (r.width() < 8 || r.height() < 8) return null
+        return Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height())
+    }
+
+    private fun langName(): String {
+        val tag = prefs.getString("lang", "fr-FR") ?: "fr-FR"
+        return Locale.forLanguageTag(tag).getDisplayLanguage(Locale.FRENCH)
+    }
+
+    private fun transcribeThenSpeak(jobs: List<AiJob>) {
+        val key = aiKey() ?: return
+        val model = prefs.getString("ai_model", AiOcr.MODEL_PRECISE) ?: AiOcr.MODEL_PRECISE
+        val lang = langName()
+        val crops = jobs.map { cropFor(it) }
+        stopSpeaking()
+        picker?.setHighlight(jobs.flatMap { it.rects })
+        toast("Lecture par l'IA…")
+        aiBusy = true
+        Thread {
+            val results = arrayOfNulls<String>(jobs.size)
+            val errors = java.util.concurrent.ConcurrentLinkedQueue<String>()
+            val latch = CountDownLatch(jobs.size)
+            jobs.forEachIndexed { i, job ->
+                aiPool.execute {
+                    val crop = crops[i]
+                    try {
+                        if (crop != null) {
+                            results[i] = AiOcr.transcribe(key, model, crop, job.hint, job.whole, lang)
+                        }
+                    } catch (e: Exception) {
+                        errors.add(e.message ?: "erreur réseau")
+                    } finally {
+                        crop?.recycle()
+                        latch.countDown()
+                    }
+                }
+            }
+            latch.await()
+            main.post {
+                aiBusy = false
+                if (errors.isNotEmpty()) toast("IA : ${errors.first()} (lecture locale à la place)")
+                val items = jobs.mapIndexed { i, job ->
+                    val ai = results[i]?.takeIf { it.isNotBlank() && !it.contains("[vide]") }
+                    (ai ?: job.hint) to job.rects
+                }.filter { it.first.isNotBlank() }
+                if (items.isEmpty()) toast("Aucun texte trouvé") else speakItems(items)
+            }
+        }.start()
     }
 
     private fun speakItems(items: List<Pair<String, List<Rect>>>) {
@@ -617,6 +708,7 @@ class OverlayService : Service() {
         } catch (_: Exception) {
         }
         recognizer.close()
+        aiPool.shutdownNow()
         captureThread.quitSafely()
         super.onDestroy()
     }
