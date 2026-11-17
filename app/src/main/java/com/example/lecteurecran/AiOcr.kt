@@ -19,11 +19,59 @@ object AiOcr {
 
     class Cfg(val provider: String, val key: String, val model: String)
 
+    private class ModelNotFound(msg: String) : RuntimeException(msg)
+
+    /** Si le modèle réglé n'existe plus (Gemini), demande à Google la liste et prend le meilleur « Flash ». */
+    private fun <T> withModelFix(cfg: Cfg, onFixed: (String) -> Unit, block: (Cfg) -> T): T {
+        try {
+            return block(cfg)
+        } catch (e: ModelNotFound) {
+            if (cfg.provider != "gemini") throw e
+            val m = discoverGeminiModel(cfg.key) ?: throw e
+            if (m == cfg.model) throw e
+            val r = block(Cfg(cfg.provider, cfg.key, m))
+            onFixed(m)
+            return r
+        }
+    }
+
+    private fun discoverGeminiModel(key: String): String? {
+        val c = URL("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000")
+            .openConnection() as HttpURLConnection
+        c.connectTimeout = 15000
+        c.readTimeout = 30000
+        c.setRequestProperty("x-goog-api-key", key)
+        if (c.responseCode !in 200..299) return null
+        val arr = JSONObject(c.inputStream.bufferedReader().readText()).optJSONArray("models") ?: return null
+        val rx = Regex("^gemini-(\\d+(?:\\.\\d+)?)-flash(.*)$")
+        val bad = listOf("lite", "image", "tts", "live", "audio", "embedding", "native", "robotics", "computer")
+        var best: String? = null
+        var bestScore = -1.0
+        for (i in 0 until arr.length()) {
+            val m = arr.getJSONObject(i)
+            val methods = m.optJSONArray("supportedGenerationMethods") ?: continue
+            var ok = false
+            for (j in 0 until methods.length()) if (methods.getString(j) == "generateContent") ok = true
+            if (!ok) continue
+            val name = m.getString("name").removePrefix("models/")
+            val match = rx.find(name) ?: continue
+            if (bad.any { name.contains(it) }) continue
+            // plus la version est haute, mieux c'est ; à version égale on préfère le modèle stable
+            val score = match.groupValues[1].toDouble() + (if (name.contains("preview") || name.contains("exp")) 0.0 else 0.001)
+            if (score > bestScore) {
+                bestScore = score
+                best = name
+            }
+        }
+        return best
+    }
+
     fun defaultModel(provider: String) =
         if (provider == "claude") "claude-sonnet-5-5" else "gemini-2.5-flash"
 
     fun transcribe(
-        cfg: Cfg, bmp: Bitmap, hint: String, whole: Boolean, langName: String
+        cfg: Cfg, bmp: Bitmap, hint: String, whole: Boolean, langName: String,
+        onModelFixed: (String) -> Unit = {}
     ): String {
         var img = bmp
         val maxSide = 1600
@@ -51,11 +99,16 @@ object AiOcr {
             "S'il n'y a aucun texte, réponds exactement : [vide]." +
             (if (hint.isNotBlank()) "\nLecture automatique approximative (peut contenir des erreurs) : $hint" else "")
 
-        return if (cfg.provider == "claude") claudeImage(cfg, b64, prompt) else geminiImage(cfg, b64, prompt)
+        return withModelFix(cfg, onModelFixed) { c ->
+            if (c.provider == "claude") claudeImage(c, b64, prompt) else geminiImage(c, b64, prompt)
+        }
     }
 
     /** Petit appel de test pour vérifier la clé et le modèle. */
-    fun ping(cfg: Cfg): String =
+    fun ping(cfg: Cfg, onModelFixed: (String) -> Unit = {}): String =
+        withModelFix(cfg, onModelFixed) { c -> pingOnce(c) }
+
+    private fun pingOnce(cfg: Cfg): String =
         if (cfg.provider == "claude") {
             val body = JSONObject().put("model", cfg.model).put("max_tokens", 10).put(
                 "messages",
@@ -123,7 +176,7 @@ object AiOcr {
                 )
             )
             .put(JSONObject().put("text", prompt))
-        val gen = JSONObject().put("temperature", 0.1).put("maxOutputTokens", 3000)
+        val gen = JSONObject().put("temperature", 0.1).put("maxOutputTokens", 8000)
         // Modèles 2.5 Flash : pas de « réflexion » (plus rapide, et ne mange pas la limite de sortie)
         if (cfg.model.contains("2.5") && cfg.model.contains("flash")) {
             gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
@@ -169,7 +222,9 @@ object AiOcr {
                 when {
                     code == 401 || (code == 400 && msg.contains("API key", true)) -> "clé API invalide"
                     code == 403 -> "accès refusé : $msg"
-                    code == 404 -> "modèle « ${cfg.model} » introuvable : change-le dans les réglages"
+                    code == 404 -> throw ModelNotFound("modèle « ${cfg.model} » introuvable")
+                    code == 429 && free && msg.contains("limit: 0") ->
+                        "le modèle « ${cfg.model} » n'est pas gratuit : choisis-en un autre (ex. un modèle Flash)"
                     code == 429 && free -> "limite gratuite atteinte, réessaie dans une minute"
                     code == 429 -> "trop de requêtes ou crédit épuisé"
                     else -> msg

@@ -623,7 +623,9 @@ class OverlayService : Service() {
                     val crop = crops[i]
                     try {
                         if (crop != null) {
-                            results[i] = AiOcr.transcribe(cfg, crop, job.hint, job.whole, lang)
+                            results[i] = AiOcr.transcribe(cfg, crop, job.hint, job.whole, lang) { m ->
+                                prefs.edit().putString("model_${cfg.provider}", m).apply()
+                            }
                         }
                     } catch (e: Exception) {
                         errors.add(e.message ?: "erreur réseau")

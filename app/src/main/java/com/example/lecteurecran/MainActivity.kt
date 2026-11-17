@@ -236,7 +236,10 @@ class MainActivity : Activity() {
                     val cfg = AiOcr.Cfg(curProv, key, model)
                     Thread {
                         val msg = try {
-                            "Clé valable : l'IA répond « ${AiOcr.ping(cfg)} »"
+                            var fixed: String? = null
+                            val r = AiOcr.ping(cfg) { m -> fixed = m }
+                            fixed?.let { m -> runOnUiThread { modelEdit.setText(m) } }
+                            "Clé valable ✔ (modèle ${fixed ?: model}) : l'IA répond « $r »"
                         } catch (e: Exception) {
                             "Échec : ${e.message}"
                         }
