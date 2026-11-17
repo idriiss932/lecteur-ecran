@@ -90,8 +90,11 @@ object AiOcr {
         return scored.sortedByDescending { it.first }.map { it.second }
     }
 
-    fun defaultModel(provider: String) =
-        if (provider == "claude") "claude-sonnet-5-5" else "gemini-2.5-flash"
+    fun defaultModel(provider: String) = when (provider) {
+        "claude" -> "claude-sonnet-5-5"
+        "mistral" -> "mistral-small-latest"
+        else -> "gemini-2.5-flash"
+    }
 
     fun transcribe(
         cfg: Cfg, bmp: Bitmap, hint: String, whole: Boolean, langName: String,
@@ -124,7 +127,11 @@ object AiOcr {
             (if (hint.isNotBlank()) "\nLecture automatique approximative (peut contenir des erreurs) : $hint" else "")
 
         return withModelFix(cfg, onModelFixed) { c ->
-            if (c.provider == "claude") claudeImage(c, b64, prompt) else geminiImage(c, b64, prompt)
+            when (c.provider) {
+                "claude" -> claudeImage(c, b64, prompt)
+                "mistral" -> mistralImage(c, b64, prompt)
+                else -> geminiImage(c, b64, prompt)
+            }
         }
     }
 
@@ -133,7 +140,13 @@ object AiOcr {
         withModelFix(cfg, onModelFixed) { c -> pingOnce(c) }
 
     private fun pingOnce(cfg: Cfg): String =
-        if (cfg.provider == "claude") {
+        if (cfg.provider == "mistral") {
+            val body = JSONObject().put("model", cfg.model).put("max_tokens", 10).put(
+                "messages",
+                JSONArray().put(JSONObject().put("role", "user").put("content", "Réponds seulement : OK"))
+            )
+            mistralText(post(MISTRAL_URL, mistralHeaders(cfg), body, cfg))
+        } else if (cfg.provider == "claude") {
             val body = JSONObject().put("model", cfg.model).put("max_tokens", 10).put(
                 "messages",
                 JSONArray().put(JSONObject().put("role", "user").put("content", "Réponds seulement : OK"))
@@ -150,6 +163,36 @@ object AiOcr {
             )
             geminiText(post(geminiUrl(cfg), geminiHeaders(cfg), body, cfg))
         }
+
+    // ------------------------------------------------------------------ Mistral
+
+    private const val MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+
+    private fun mistralHeaders(cfg: Cfg) = mapOf("Authorization" to "Bearer ${cfg.key}")
+
+    private fun mistralImage(cfg: Cfg, b64: String, prompt: String): String {
+        val content = JSONArray()
+            .put(JSONObject().put("type", "text").put("text", prompt))
+            .put(JSONObject().put("type", "image_url").put("image_url", "data:image/jpeg;base64,$b64"))
+        val body = JSONObject()
+            .put("model", cfg.model)
+            .put("max_tokens", 1500)
+            .put("temperature", 0.1)
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+        return mistralText(post(MISTRAL_URL, mistralHeaders(cfg), body, cfg))
+    }
+
+    private fun mistralText(json: String): String {
+        val choices = JSONObject(json).optJSONArray("choices")
+        if (choices == null || choices.length() == 0) throw RuntimeException("réponse vide")
+        val c = choices.getJSONObject(0).getJSONObject("message").get("content")
+        if (c is JSONArray) {
+            val sb = StringBuilder()
+            for (i in 0 until c.length()) sb.append(c.getJSONObject(i).optString("text"))
+            return sb.toString().trim()
+        }
+        return c.toString().trim()
+    }
 
     // ------------------------------------------------------------------ Claude
 
@@ -251,7 +294,7 @@ object AiOcr {
             } catch (e: Exception) {
                 "HTTP $code"
             }
-            val free = cfg.provider == "gemini"
+            val free = cfg.provider != "claude"
             throw RuntimeException(
                 when {
                     code == 401 || (code == 400 && msg.contains("API key", true)) -> "clé API invalide"
