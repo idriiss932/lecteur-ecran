@@ -45,4 +45,5 @@ dependencies {
     implementation("androidx.core:core:1.13.1")
     // OCR hors ligne (modèle latin embarqué : français, anglais, espagnol, allemand, italien...)
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.android.gms:play-services-tasks:18.2.0")
 }

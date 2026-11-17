@@ -554,8 +554,7 @@ class OverlayService : Service() {
         }
         currentText = id
         if (aiConfig() == null) {
-            if (hint.isBlank()) toast("Aucun texte ici. Entoure la bulle avec le doigt.")
-            else speakItems(listOf(hint to rects))
+            localRefineThenSpeak(listOf(AiJob(hint, rects, region, whole)))
         } else {
             transcribeThenSpeak(listOf(AiJob(hint, rects, region, whole)))
         }
@@ -568,7 +567,7 @@ class OverlayService : Service() {
             return
         }
         if (aiConfig() == null) {
-            speakItems(pickerBlocks.map { it.text to listOf(it.rect) })
+            localRefineThenSpeak(pickerBlocks.map { AiJob(it.text, listOf(it.rect), it.rect, false) })
         } else {
             // Une seule requête pour toute la page (économise le quota gratuit)
             val bmp = pickerBitmap ?: return
@@ -583,6 +582,54 @@ class OverlayService : Service() {
                 )
             )
         }
+    }
+
+    /** Découpe serrée pour la lecture locale (sur le thread principal). */
+    private fun cropLocal(job: AiJob): Bitmap? {
+        val bmp = pickerBitmap ?: return null
+        val r = Rect(job.region)
+        if (!job.whole) {
+            val pad = (8 * dp).toInt()
+            r.inset(-pad, -pad)
+        }
+        if (!r.intersect(0, 0, bmp.width, bmp.height)) return null
+        if (r.width() < 8 || r.height() < 8) return null
+        val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height())
+        return if (crop === bmp) bmp.copy(Bitmap.Config.ARGB_8888, false) else crop
+    }
+
+    /** Lecture hors ligne améliorée : agrandissement + contraste + plusieurs essais. */
+    private fun localRefineThenSpeak(jobs: List<AiJob>) {
+        val crops = jobs.map { cropLocal(it) }
+        stopSpeaking()
+        picker?.setHighlight(jobs.flatMap { it.rects })
+        toast("Lecture en cours…")
+        aiBusy = true
+        Thread {
+            val results = jobs.mapIndexed { i, job ->
+                val crop = crops[i]
+                try {
+                    if (crop == null) null
+                    else LocalOcr.read(recognizer, crop, job.hint, job.hint.isBlank() && !job.whole)
+                } catch (e: Exception) {
+                    null
+                } finally {
+                    crop?.recycle()
+                }
+            }
+            main.post {
+                aiBusy = false
+                val items = jobs.mapIndexed { i, job ->
+                    (results[i]?.takeIf { it.isNotBlank() } ?: job.hint) to job.rects
+                }.filter { it.first.isNotBlank() }
+                if (items.isEmpty()) {
+                    toast("Aucun texte ici. Entoure la bulle avec le doigt.")
+                    picker?.setHighlight(emptyList())
+                } else {
+                    speakItems(items)
+                }
+            }
+        }.start()
     }
 
     /** Découpe la zone dans l'image figée (sur le thread principal). */
