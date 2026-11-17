@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val vc = (project.findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 1
+
 android {
     namespace = "com.example.lecteurecran"
     compileSdk = 34
@@ -11,8 +13,18 @@ android {
         applicationId = "com.example.lecteurecran"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = vc
+        versionName = "1.$vc"
+    }
+
+    // Clé de signature fixe : indispensable pour que les mises à jour s'installent par-dessus l'appli
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("lecteur.jks")
+            storePassword = "lecteur123"
+            keyAlias = "lecteur"
+            keyPassword = "lecteur123"
+        }
     }
 
     buildTypes {
@@ -30,6 +42,7 @@ android {
 }
 
 dependencies {
+    implementation("androidx.core:core:1.13.1")
     // OCR hors ligne (modèle latin embarqué : français, anglais, espagnol, allemand, italien...)
     implementation("com.google.mlkit:text-recognition:16.0.1")
 }

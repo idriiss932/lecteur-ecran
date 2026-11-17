@@ -23,6 +23,11 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.FileProvider
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 
 class MainActivity : Activity() {
@@ -31,6 +36,7 @@ class MainActivity : Activity() {
         const val REQ_OVERLAY = 1
         const val REQ_PROJECTION = 2
         const val REQ_NOTIF = 3
+        const val REPO = "idriiss932/lecteur-ecran"
     }
 
     private val languages = listOf(
@@ -56,6 +62,9 @@ class MainActivity : Activity() {
     private var notifAsked = false
     private var tts: TextToSpeech? = null
     private var voiceList: List<Voice> = emptyList()
+    private lateinit var updateBtn: Button
+    private var pendingUrl: String? = null
+    private var downloading = false
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun langTag() = prefs.getString("lang", "fr-FR") ?: "fr-FR"
@@ -142,6 +151,16 @@ class MainActivity : Activity() {
             })
         })
 
+        updateBtn = Button(this).apply {
+            text = "Rechercher une mise à jour"
+            setOnClickListener { onUpdateClick() }
+        }
+        col.addView(updateBtn)
+        col.addView(TextView(this).apply {
+            text = "Version installée : v${localVersion()}"
+            textSize = 12f
+        })
+
         col.addView(Button(this).apply {
             text = "Activer"
             setOnClickListener { begin() }
@@ -160,6 +179,7 @@ class MainActivity : Activity() {
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) refreshVoices()
         }
+        checkUpdate(false)
     }
 
     override fun onResume() {
@@ -230,6 +250,119 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             startActivity(Intent(Settings.ACTION_SETTINGS))
         }
+    }
+
+    // ---------------------------------------------------------------- mise à jour
+
+    @Suppress("DEPRECATION")
+    private fun localVersion(): Long {
+        val info = packageManager.getPackageInfo(packageName, 0)
+        return if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+
+    /** Interroge la dernière « Release » GitHub (le dépôt doit être public). */
+    private fun checkUpdate(manual: Boolean) {
+        if (manual) updateBtn.text = "Recherche en cours…"
+        Thread {
+            try {
+                val c = URL("https://api.github.com/repos/$REPO/releases/latest")
+                    .openConnection() as HttpURLConnection
+                c.setRequestProperty("Accept", "application/vnd.github+json")
+                c.connectTimeout = 10000
+                c.readTimeout = 15000
+                if (c.responseCode != 200) throw RuntimeException("HTTP ${c.responseCode} (dépôt public ?)")
+                val json = JSONObject(c.inputStream.bufferedReader().readText())
+                val remote = json.getString("tag_name").trim().removePrefix("v").toLongOrNull() ?: 0L
+                val assets = json.getJSONArray("assets")
+                var url: String? = null
+                for (i in 0 until assets.length()) {
+                    val a = assets.getJSONObject(i)
+                    if (a.getString("name").endsWith(".apk")) url = a.getString("browser_download_url")
+                }
+                runOnUiThread {
+                    if (url != null && remote > localVersion()) {
+                        pendingUrl = url
+                        updateBtn.text = "⬇ Installer la mise à jour (v$remote)"
+                    } else {
+                        pendingUrl = null
+                        updateBtn.text = "Rechercher une mise à jour"
+                        if (manual) toast("Tu as déjà la dernière version (v${localVersion()})")
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    updateBtn.text = "Rechercher une mise à jour"
+                    if (manual) toast("Vérification impossible : ${e.message}")
+                }
+            }
+        }.start()
+    }
+
+    private fun onUpdateClick() {
+        if (downloading) return
+        val url = pendingUrl
+        if (url == null) {
+            checkUpdate(true)
+            return
+        }
+        if (!packageManager.canRequestPackageInstalls()) {
+            toast("Autorise l'installation depuis cette appli, puis reviens et réappuie sur le bouton")
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+            )
+            return
+        }
+        downloading = true
+        Thread {
+            try {
+                val file = File(getExternalFilesDir(null), "update.apk")
+                val c = URL(url).openConnection() as HttpURLConnection
+                c.connectTimeout = 15000
+                c.readTimeout = 30000
+                val total = c.contentLength.toLong()
+                var done = 0L
+                var lastPct = -1
+                c.inputStream.use { input ->
+                    file.outputStream().use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            done += n
+                            if (total > 0) {
+                                val pct = (done * 100 / total).toInt()
+                                if (pct != lastPct) {
+                                    lastPct = pct
+                                    runOnUiThread { updateBtn.text = "Téléchargement… $pct %" }
+                                }
+                            }
+                        }
+                    }
+                }
+                runOnUiThread {
+                    downloading = false
+                    updateBtn.text = "Installation…"
+                    installApk(file)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    downloading = false
+                    updateBtn.text = "⬇ Installer la mise à jour"
+                    toast("Téléchargement impossible : ${e.message}")
+                }
+            }
+        }.start()
+    }
+
+    private fun installApk(file: File) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
     }
 
     // ---------------------------------------------------------------- démarrage

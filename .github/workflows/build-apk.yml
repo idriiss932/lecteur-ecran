@@ -17,14 +17,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-      - run: gradle assembleDebug --no-daemon
+      - run: gradle assembleDebug --no-daemon -PappVersionCode=${{ github.run_number }}
       - name: Publier l'APK (Release + branche apk)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk /tmp/LecteurEcran.apk
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest /tmp/LecteurEcran.apk --title "Lecteur d'ecran (APK)" --notes "Telecharge LecteurEcran.apk puis ouvre-le sur ton telephone."
+          gh release create "v${{ github.run_number }}" /tmp/LecteurEcran.apk --title "Lecteur d'ecran v${{ github.run_number }}" --notes "Mise a jour automatique via l'appli (bouton Rechercher une mise a jour)."
           git config user.name github-actions
           git config user.email actions@github.com
           git checkout --orphan apk
