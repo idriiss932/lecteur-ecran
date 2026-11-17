@@ -263,6 +263,26 @@ class MainActivity : Activity() {
             })
         })
 
+        col.addView(TextView(this).apply {
+            text = "Ignorer le haut de l'écran (barre d'adresse du navigateur) : ${prefs.getInt("ignore_top_dp", 0)} dp"
+            textSize = 14f
+            setPadding(0, dp(16), 0, 0)
+            tag = "ignoreLabel"
+        })
+        col.addView(SeekBar(this).apply {
+            max = 200
+            progress = prefs.getInt("ignore_top_dp", 0)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                    prefs.edit().putInt("ignore_top_dp", p).apply()
+                    col.findViewWithTag<TextView>("ignoreLabel")?.text =
+                        "Ignorer le haut de l'écran (barre d'adresse du navigateur) : $p dp"
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        })
+
         updateBtn = Button(this).apply {
             text = "Rechercher une mise à jour"
             setOnClickListener { onUpdateClick() }

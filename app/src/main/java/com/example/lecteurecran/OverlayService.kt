@@ -384,9 +384,11 @@ class OverlayService : Service() {
     // ---------------------------------------------------------------- calque de sélection
 
     private fun showPicker(result: Text, bmp: Bitmap) {
+        val cut = topCut()
         val blocks = result.textBlocks.mapNotNull { b ->
             val r = b.boundingBox ?: return@mapNotNull null
             if (b.text.isBlank()) return@mapNotNull null
+            if (r.centerY() < cut) return@mapNotNull null // barre d'état / barre du navigateur
             OcrBlock(
                 b.text, r,
                 b.lines.mapNotNull { l -> l.boundingBox?.let { OcrLine(l.text, it) } }
@@ -525,6 +527,13 @@ class OverlayService : Service() {
         t.setSpeechRate(prefs.getFloat("rate", 1f))
     }
 
+    /** Hauteur (px) en haut de l'écran à ignorer : barre d'état + réglage « ignorer le haut ». */
+    private fun topCut(): Int {
+        val id = resources.getIdentifier("status_bar_height", "dimen", "android")
+        val status = if (id > 0) resources.getDimensionPixelSize(id) else (28 * dp).toInt()
+        return status + (prefs.getInt("ignore_top_dp", 0) * dp).toInt()
+    }
+
     private fun aiConfig(): AiOcr.Cfg? {
         val prov = prefs.getString("ai_provider", "gemini") ?: "gemini"
         val key = prefs.getString("key_$prov", "")?.trim().orEmpty()
@@ -568,7 +577,7 @@ class OverlayService : Service() {
                     AiJob(
                         pickerBlocks.joinToString("\n") { it.text },
                         pickerBlocks.map { it.rect },
-                        Rect(0, 0, bmp.width, bmp.height),
+                        Rect(0, topCut().coerceAtMost(bmp.height - 1), bmp.width, bmp.height),
                         true
                     )
                 )
