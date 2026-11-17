@@ -224,17 +224,27 @@ object AiOcr {
     // ------------------------------------------------------------------ réseau
 
     private fun post(url: String, headers: Map<String, String>, body: JSONObject, cfg: Cfg): String {
-        val c = URL(url).openConnection() as HttpURLConnection
-        c.requestMethod = "POST"
-        c.connectTimeout = 15000
-        c.readTimeout = 60000
-        c.doOutput = true
-        c.setRequestProperty("content-type", "application/json")
-        for ((k, v) in headers) c.setRequestProperty(k, v)
-        c.outputStream.use { it.write(body.toString().toByteArray()) }
-        val code = c.responseCode
-        val text = (if (code in 200..299) c.inputStream else c.errorStream)
-            ?.bufferedReader()?.readText() ?: ""
+        val code: Int
+        val text: String
+        try {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.requestMethod = "POST"
+            c.connectTimeout = 15000
+            c.readTimeout = 30000
+            c.doOutput = true
+            c.setRequestProperty("content-type", "application/json")
+            for ((k, v) in headers) c.setRequestProperty(k, v)
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            code = c.responseCode
+            text = (if (code in 200..299) c.inputStream else c.errorStream)
+                ?.bufferedReader()?.readText() ?: ""
+        } catch (e: java.net.SocketTimeoutException) {
+            throw Overloaded("Google ne répond pas (délai dépassé) : connexion lente ou serveur occupé")
+        } catch (e: java.net.UnknownHostException) {
+            throw RuntimeException("pas d'accès à internet pour l'appli (Wi-Fi, VPN, DNS privé ou économiseur de données ?)")
+        } catch (e: java.io.IOException) {
+            throw RuntimeException("erreur réseau : ${e.message}")
+        }
         if (code !in 200..299) {
             val msg = try {
                 JSONObject(text).getJSONObject("error").getString("message")

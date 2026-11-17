@@ -224,6 +224,7 @@ class MainActivity : Activity() {
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
         loadProvider()
+        val testView = TextView(this).apply { textSize = 13f }
         col.addView(Button(this).apply {
             text = "Tester la clé"
             setOnClickListener {
@@ -233,6 +234,7 @@ class MainActivity : Activity() {
                     toast("Colle d'abord ta clé")
                 } else {
                     toast("Test en cours…")
+                    testView.text = "Test en cours… (peut prendre jusqu'à une minute, reste dans l'appli)"
                     val cfg = AiOcr.Cfg(curProv, key, model)
                     Thread {
                         val msg = try {
@@ -243,11 +245,15 @@ class MainActivity : Activity() {
                         } catch (e: Exception) {
                             "Échec : ${e.message}"
                         }
-                        runOnUiThread { toast(msg) }
+                        runOnUiThread {
+                            toast(msg)
+                            testView.text = msg
+                        }
                     }.start()
                 }
             }
         })
+        col.addView(testView)
 
         // ---- vitesse
         col.addView(TextView(this).apply {
