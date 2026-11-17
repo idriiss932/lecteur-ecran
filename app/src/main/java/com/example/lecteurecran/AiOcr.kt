@@ -9,21 +9,24 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.max
 
-/** Lecture du texte d'une image par l'API Claude (vision). Appels bloquants : à lancer hors du thread principal. */
+/**
+ * Lecture du texte d'une image par une IA de vision.
+ *  - "gemini" : API Gemini de Google (offre gratuite, clé sur aistudio.google.com)
+ *  - "claude" : API Claude d'Anthropic (payante, clé sur console.anthropic.com)
+ * Appels bloquants : à lancer hors du thread principal.
+ */
 object AiOcr {
 
-    const val MODEL_PRECISE = "claude-sonnet-5-5"
-    const val MODEL_FAST = "claude-haiku-5-5"
+    class Cfg(val provider: String, val key: String, val model: String)
 
-    private const val URL_API = "https://api.anthropic.com/v1/messages"
+    fun defaultModel(provider: String) =
+        if (provider == "claude") "claude-sonnet-5-5" else "gemini-2.5-flash"
 
-    /** Transcrit le texte d'une bulle (whole=false : bulle au centre) ou de toute la zone (whole=true). */
     fun transcribe(
-        apiKey: String, model: String, bmp: Bitmap,
-        hint: String, whole: Boolean, langName: String
+        cfg: Cfg, bmp: Bitmap, hint: String, whole: Boolean, langName: String
     ): String {
         var img = bmp
-        val maxSide = 1400
+        val maxSide = 1600
         if (max(img.width, img.height) > maxSide) {
             val k = maxSide.toFloat() / max(img.width, img.height)
             img = Bitmap.createScaledBitmap(img, (img.width * k).toInt(), (img.height * k).toInt(), true)
@@ -34,7 +37,9 @@ object AiOcr {
         val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
 
         val target = if (whole) {
-            "Transcris tout le texte visible dans cette image, dans l'ordre de lecture (haut vers bas, gauche vers droite)."
+            "Transcris tout le texte des bulles et des cases de texte visibles dans cette image, " +
+                "dans l'ordre de lecture d'une BD (haut vers bas, gauche vers droite). " +
+                "Sépare les bulles par un saut de ligne."
         } else {
             "Transcris uniquement le texte de la bulle (ou de la case de texte) située au centre de l'image. " +
                 "Ignore les textes d'autres bulles qui apparaissent coupés sur les bords."
@@ -46,6 +51,37 @@ object AiOcr {
             "S'il n'y a aucun texte, réponds exactement : [vide]." +
             (if (hint.isNotBlank()) "\nLecture automatique approximative (peut contenir des erreurs) : $hint" else "")
 
+        return if (cfg.provider == "claude") claudeImage(cfg, b64, prompt) else geminiImage(cfg, b64, prompt)
+    }
+
+    /** Petit appel de test pour vérifier la clé et le modèle. */
+    fun ping(cfg: Cfg): String =
+        if (cfg.provider == "claude") {
+            val body = JSONObject().put("model", cfg.model).put("max_tokens", 10).put(
+                "messages",
+                JSONArray().put(JSONObject().put("role", "user").put("content", "Réponds seulement : OK"))
+            )
+            claudeText(post("https://api.anthropic.com/v1/messages", claudeHeaders(cfg), body, cfg))
+        } else {
+            val body = JSONObject().put(
+                "contents",
+                JSONArray().put(
+                    JSONObject().put(
+                        "parts", JSONArray().put(JSONObject().put("text", "Réponds seulement : OK"))
+                    )
+                )
+            )
+            geminiText(post(geminiUrl(cfg), geminiHeaders(cfg), body, cfg))
+        }
+
+    // ------------------------------------------------------------------ Claude
+
+    private fun claudeHeaders(cfg: Cfg) = mapOf(
+        "x-api-key" to cfg.key,
+        "anthropic-version" to "2023-06-01"
+    )
+
+    private fun claudeImage(cfg: Cfg, b64: String, prompt: String): String {
         val content = JSONArray()
             .put(
                 JSONObject().put("type", "image").put(
@@ -55,27 +91,13 @@ object AiOcr {
             )
             .put(JSONObject().put("type", "text").put("text", prompt))
         val body = JSONObject()
-            .put("model", model)
-            .put("max_tokens", 700)
+            .put("model", cfg.model)
+            .put("max_tokens", 1500)
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
-        return extractText(post(apiKey, body))
+        return claudeText(post("https://api.anthropic.com/v1/messages", claudeHeaders(cfg), body, cfg))
     }
 
-    /** Petit appel de test pour vérifier la clé et le modèle. */
-    fun ping(apiKey: String, model: String): String {
-        val body = JSONObject()
-            .put("model", model)
-            .put("max_tokens", 10)
-            .put(
-                "messages",
-                JSONArray().put(
-                    JSONObject().put("role", "user").put("content", "Réponds seulement : OK")
-                )
-            )
-        return extractText(post(apiKey, body))
-    }
-
-    private fun extractText(json: String): String {
+    private fun claudeText(json: String): String {
         val content = JSONObject(json).getJSONArray("content")
         val sb = StringBuilder()
         for (i in 0 until content.length()) {
@@ -85,15 +107,53 @@ object AiOcr {
         return sb.toString().trim()
     }
 
-    private fun post(apiKey: String, body: JSONObject): String {
-        val c = URL(URL_API).openConnection() as HttpURLConnection
+    // ------------------------------------------------------------------ Gemini
+
+    private fun geminiUrl(cfg: Cfg) =
+        "https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:generateContent"
+
+    private fun geminiHeaders(cfg: Cfg) = mapOf("x-goog-api-key" to cfg.key)
+
+    private fun geminiImage(cfg: Cfg, b64: String, prompt: String): String {
+        val parts = JSONArray()
+            .put(
+                JSONObject().put(
+                    "inline_data",
+                    JSONObject().put("mime_type", "image/jpeg").put("data", b64)
+                )
+            )
+            .put(JSONObject().put("text", prompt))
+        val gen = JSONObject().put("temperature", 0.1).put("maxOutputTokens", 3000)
+        // Modèles 2.5 Flash : pas de « réflexion » (plus rapide, et ne mange pas la limite de sortie)
+        if (cfg.model.contains("2.5") && cfg.model.contains("flash")) {
+            gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+        }
+        val body = JSONObject()
+            .put("contents", JSONArray().put(JSONObject().put("parts", parts)))
+            .put("generationConfig", gen)
+        return geminiText(post(geminiUrl(cfg), geminiHeaders(cfg), body, cfg))
+    }
+
+    private fun geminiText(json: String): String {
+        val cands = JSONObject(json).optJSONArray("candidates")
+        if (cands == null || cands.length() == 0) throw RuntimeException("réponse bloquée par Google")
+        val parts = cands.getJSONObject(0).optJSONObject("content")?.optJSONArray("parts")
+            ?: throw RuntimeException("réponse vide")
+        val sb = StringBuilder()
+        for (i in 0 until parts.length()) sb.append(parts.getJSONObject(i).optString("text"))
+        return sb.toString().trim()
+    }
+
+    // ------------------------------------------------------------------ réseau
+
+    private fun post(url: String, headers: Map<String, String>, body: JSONObject, cfg: Cfg): String {
+        val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "POST"
         c.connectTimeout = 15000
         c.readTimeout = 60000
         c.doOutput = true
         c.setRequestProperty("content-type", "application/json")
-        c.setRequestProperty("x-api-key", apiKey)
-        c.setRequestProperty("anthropic-version", "2023-06-01")
+        for ((k, v) in headers) c.setRequestProperty(k, v)
         c.outputStream.use { it.write(body.toString().toByteArray()) }
         val code = c.responseCode
         val text = (if (code in 200..299) c.inputStream else c.errorStream)
@@ -104,12 +164,14 @@ object AiOcr {
             } catch (e: Exception) {
                 "HTTP $code"
             }
+            val free = cfg.provider == "gemini"
             throw RuntimeException(
-                when (code) {
-                    401 -> "clé API invalide"
-                    403 -> "accès refusé ($msg)"
-                    404 -> "modèle introuvable ($msg)"
-                    429 -> "trop de requêtes ou crédit épuisé ($msg)"
+                when {
+                    code == 401 || (code == 400 && msg.contains("API key", true)) -> "clé API invalide"
+                    code == 403 -> "accès refusé : $msg"
+                    code == 404 -> "modèle « ${cfg.model} » introuvable : change-le dans les réglages"
+                    code == 429 && free -> "limite gratuite atteinte, réessaie dans une minute"
+                    code == 429 -> "trop de requêtes ou crédit épuisé"
                     else -> msg
                 }
             )

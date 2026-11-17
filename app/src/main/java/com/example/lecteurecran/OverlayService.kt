@@ -393,7 +393,7 @@ class OverlayService : Service() {
             )
         }
         if (blocks.isEmpty()) {
-            if (aiKey() == null) {
+            if (aiConfig() == null) {
                 bmp.recycle()
                 toast("Aucun texte détecté")
                 return
@@ -525,7 +525,13 @@ class OverlayService : Service() {
         t.setSpeechRate(prefs.getFloat("rate", 1f))
     }
 
-    private fun aiKey(): String? = prefs.getString("ai_key", null)?.trim()?.takeIf { it.isNotEmpty() }
+    private fun aiConfig(): AiOcr.Cfg? {
+        val prov = prefs.getString("ai_provider", "gemini") ?: "gemini"
+        val key = prefs.getString("key_$prov", "")?.trim().orEmpty()
+        if (key.isEmpty()) return null
+        val model = prefs.getString("model_$prov", "")?.trim().orEmpty().ifEmpty { AiOcr.defaultModel(prov) }
+        return AiOcr.Cfg(prov, key, model)
+    }
 
     private fun onPickerRead(hint: String, rects: List<Rect>, region: Rect, whole: Boolean) {
         if (aiBusy) {
@@ -538,7 +544,7 @@ class OverlayService : Service() {
             return
         }
         currentText = id
-        if (aiKey() == null) {
+        if (aiConfig() == null) {
             if (hint.isBlank()) toast("Aucun texte ici. Entoure la bulle avec le doigt.")
             else speakItems(listOf(hint to rects))
         } else {
@@ -552,10 +558,21 @@ class OverlayService : Service() {
             toast("Lecture IA en cours…")
             return
         }
-        if (aiKey() == null) {
+        if (aiConfig() == null) {
             speakItems(pickerBlocks.map { it.text to listOf(it.rect) })
         } else {
-            transcribeThenSpeak(pickerBlocks.map { AiJob(it.text, listOf(it.rect), it.rect, false) })
+            // Une seule requête pour toute la page (économise le quota gratuit)
+            val bmp = pickerBitmap ?: return
+            transcribeThenSpeak(
+                listOf(
+                    AiJob(
+                        pickerBlocks.joinToString("\n") { it.text },
+                        pickerBlocks.map { it.rect },
+                        Rect(0, 0, bmp.width, bmp.height),
+                        true
+                    )
+                )
+            )
         }
     }
 
@@ -570,7 +587,9 @@ class OverlayService : Service() {
         }
         if (!r.intersect(0, 0, bmp.width, bmp.height)) return null
         if (r.width() < 8 || r.height() < 8) return null
-        return Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height())
+        val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height())
+        // createBitmap peut renvoyer l'image d'origine si la zone la couvre en entier : on la copie
+        return if (crop === bmp) bmp.copy(Bitmap.Config.ARGB_8888, false) else crop
     }
 
     private fun langName(): String {
@@ -579,8 +598,7 @@ class OverlayService : Service() {
     }
 
     private fun transcribeThenSpeak(jobs: List<AiJob>) {
-        val key = aiKey() ?: return
-        val model = prefs.getString("ai_model", AiOcr.MODEL_PRECISE) ?: AiOcr.MODEL_PRECISE
+        val cfg = aiConfig() ?: return
         val lang = langName()
         val crops = jobs.map { cropFor(it) }
         stopSpeaking()
@@ -596,7 +614,7 @@ class OverlayService : Service() {
                     val crop = crops[i]
                     try {
                         if (crop != null) {
-                            results[i] = AiOcr.transcribe(key, model, crop, job.hint, job.whole, lang)
+                            results[i] = AiOcr.transcribe(cfg, crop, job.hint, job.whole, lang)
                         }
                     } catch (e: Exception) {
                         errors.add(e.message ?: "erreur réseau")

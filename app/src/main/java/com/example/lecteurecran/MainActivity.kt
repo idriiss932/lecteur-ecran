@@ -166,52 +166,77 @@ class MainActivity : Activity() {
             textSize = 16f
             setPadding(0, dp(24), 0, 0)
         })
-        col.addView(TextView(this).apply {
-            text = "Colle ta clé API Claude (console.anthropic.com > API keys). Sans clé, l'appli utilise la lecture locale, moins précise."
-            textSize = 12f
-        })
-        col.addView(EditText(this).apply {
-            hint = "sk-ant-..."
+        val providers = listOf(
+            "Gemini (Google) — gratuit" to "gemini",
+            "Claude (Anthropic) — payant" to "claude"
+        )
+        var curProv = prefs.getString("ai_provider", "gemini") ?: "gemini"
+        val helpView = TextView(this).apply { textSize = 12f }
+        val keyEdit = EditText(this).apply {
+            hint = "Clé API"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(prefs.getString("ai_key", ""))
-            addTextChangedListener(object : TextWatcher {
-                override fun afterTextChanged(e: Editable?) {
-                    prefs.edit().putString("ai_key", e?.toString()?.trim() ?: "").apply()
-                }
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            })
-        })
-        val models = listOf(
-            "Précis (Sonnet) — conseillé" to AiOcr.MODEL_PRECISE,
-            "Rapide et économique (Haiku)" to AiOcr.MODEL_FAST
+        }
+        val modelEdit = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        fun loadProvider() {
+            helpView.text = if (curProv == "gemini") {
+                "Clé gratuite, sans carte bancaire : aistudio.google.com > Get API key. " +
+                    "Quota gratuit limité (quelques requêtes par minute). Google peut utiliser les images envoyées."
+            } else {
+                "Clé payante : console.anthropic.com > API keys (ajouter du crédit)."
+            }
+            keyEdit.setText(prefs.getString("key_$curProv", ""))
+            modelEdit.setText(
+                prefs.getString("model_$curProv", "")?.takeIf { it.isNotBlank() } ?: AiOcr.defaultModel(curProv)
+            )
+        }
+        val provSpinner = Spinner(this)
+        provSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, providers.map { it.first }
         )
-        val modelSpinner = Spinner(this)
-        modelSpinner.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item, models.map { it.first }
-        )
-        modelSpinner.setSelection(
-            models.indexOfFirst { it.second == prefs.getString("ai_model", AiOcr.MODEL_PRECISE) }.coerceAtLeast(0)
-        )
-        modelSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+        provSpinner.setSelection(providers.indexOfFirst { it.second == curProv }.coerceAtLeast(0))
+        provSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                prefs.edit().putString("ai_model", models[pos].second).apply()
+                curProv = providers[pos].second
+                prefs.edit().putString("ai_provider", curProv).apply()
+                loadProvider()
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
-        col.addView(modelSpinner)
+        col.addView(provSpinner)
+        col.addView(helpView)
+        col.addView(keyEdit)
+        col.addView(TextView(this).apply { text = "Modèle (laisse tel quel sauf problème)"; textSize = 12f })
+        col.addView(modelEdit)
+        keyEdit.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(e: Editable?) {
+                prefs.edit().putString("key_$curProv", e?.toString()?.trim() ?: "").apply()
+            }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        modelEdit.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(e: Editable?) {
+                prefs.edit().putString("model_$curProv", e?.toString()?.trim() ?: "").apply()
+            }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        loadProvider()
         col.addView(Button(this).apply {
             text = "Tester la clé"
             setOnClickListener {
-                val key = prefs.getString("ai_key", "")?.trim().orEmpty()
-                val model = prefs.getString("ai_model", AiOcr.MODEL_PRECISE) ?: AiOcr.MODEL_PRECISE
+                val key = keyEdit.text.toString().trim()
+                val model = modelEdit.text.toString().trim().ifEmpty { AiOcr.defaultModel(curProv) }
                 if (key.isEmpty()) {
                     toast("Colle d'abord ta clé")
                 } else {
                     toast("Test en cours…")
+                    val cfg = AiOcr.Cfg(curProv, key, model)
                     Thread {
                         val msg = try {
-                            "Clé valable : l'IA répond « ${AiOcr.ping(key, model)} »"
+                            "Clé valable : l'IA répond « ${AiOcr.ping(cfg)} »"
                         } catch (e: Exception) {
                             "Échec : ${e.message}"
                         }
