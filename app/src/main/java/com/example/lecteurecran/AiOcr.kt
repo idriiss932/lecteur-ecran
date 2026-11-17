@@ -20,33 +20,59 @@ object AiOcr {
     class Cfg(val provider: String, val key: String, val model: String)
 
     private class ModelNotFound(msg: String) : RuntimeException(msg)
+    private class Overloaded(msg: String, val retry: Boolean = true) : RuntimeException(msg)
 
-    /** Si le modèle réglé n'existe plus (Gemini), demande à Google la liste et prend le meilleur « Flash ». */
+    /**
+     * Gemini : réessaie si Google est surchargé, puis essaie d'autres modèles Flash.
+     * Si le modèle réglé n'existe plus, le premier modèle qui marche est mémorisé (onFixed).
+     */
     private fun <T> withModelFix(cfg: Cfg, onFixed: (String) -> Unit, block: (Cfg) -> T): T {
-        try {
-            return block(cfg)
-        } catch (e: ModelNotFound) {
-            if (cfg.provider != "gemini") throw e
-            val m = discoverGeminiModel(cfg.key) ?: throw e
-            if (m == cfg.model) throw e
-            val r = block(Cfg(cfg.provider, cfg.key, m))
-            onFixed(m)
-            return r
+        if (cfg.provider != "gemini") return block(cfg)
+        var lastErr: RuntimeException? = null
+        for (attempt in 0..2) {
+            try {
+                return block(cfg)
+            } catch (e: ModelNotFound) {
+                lastErr = e
+                break
+            } catch (e: Overloaded) {
+                lastErr = e
+                if (!e.retry) break
+                if (attempt < 2) Thread.sleep(2000L * (attempt + 1))
+            }
         }
+        val others = try {
+            discoverGeminiModels(cfg.key).filter { it != cfg.model }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        for (m in others.take(3)) {
+            try {
+                val r = block(Cfg(cfg.provider, cfg.key, m))
+                if (lastErr is ModelNotFound) onFixed(m)
+                return r
+            } catch (e: ModelNotFound) {
+                // modèle suivant
+            } catch (e: Overloaded) {
+                lastErr = e
+            }
+        }
+        throw lastErr ?: RuntimeException("aucun modèle Gemini disponible avec cette clé")
     }
 
-    private fun discoverGeminiModel(key: String): String? {
+    /** Modèles Flash pouvant générer du texte, du meilleur au moins bon (version haute, stable, pas « lite » d'abord). */
+    private fun discoverGeminiModels(key: String): List<String> {
         val c = URL("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000")
             .openConnection() as HttpURLConnection
         c.connectTimeout = 15000
         c.readTimeout = 30000
         c.setRequestProperty("x-goog-api-key", key)
-        if (c.responseCode !in 200..299) return null
-        val arr = JSONObject(c.inputStream.bufferedReader().readText()).optJSONArray("models") ?: return null
+        if (c.responseCode !in 200..299) return emptyList()
+        val arr = JSONObject(c.inputStream.bufferedReader().readText()).optJSONArray("models")
+            ?: return emptyList()
         val rx = Regex("^gemini-(\\d+(?:\\.\\d+)?)-flash(.*)$")
-        val bad = listOf("lite", "image", "tts", "live", "audio", "embedding", "native", "robotics", "computer")
-        var best: String? = null
-        var bestScore = -1.0
+        val bad = listOf("image", "tts", "live", "audio", "embedding", "native", "robotics", "computer")
+        val scored = mutableListOf<Pair<Double, String>>()
         for (i in 0 until arr.length()) {
             val m = arr.getJSONObject(i)
             val methods = m.optJSONArray("supportedGenerationMethods") ?: continue
@@ -56,14 +82,12 @@ object AiOcr {
             val name = m.getString("name").removePrefix("models/")
             val match = rx.find(name) ?: continue
             if (bad.any { name.contains(it) }) continue
-            // plus la version est haute, mieux c'est ; à version égale on préfère le modèle stable
-            val score = match.groupValues[1].toDouble() + (if (name.contains("preview") || name.contains("exp")) 0.0 else 0.001)
-            if (score > bestScore) {
-                bestScore = score
-                best = name
-            }
+            val score = match.groupValues[1].toDouble() +
+                (if (name.contains("preview") || name.contains("exp")) 0.0 else 0.002) -
+                (if (name.contains("lite")) 0.001 else 0.0)
+            scored.add(score to name)
         }
-        return best
+        return scored.sortedByDescending { it.first }.map { it.second }
     }
 
     fun defaultModel(provider: String) =
@@ -222,10 +246,12 @@ object AiOcr {
                 when {
                     code == 401 || (code == 400 && msg.contains("API key", true)) -> "clé API invalide"
                     code == 403 -> "accès refusé : $msg"
+                    code == 503 || code == 529 -> throw Overloaded("le serveur IA est surchargé en ce moment, réessaie dans un instant")
                     code == 404 -> throw ModelNotFound("modèle « ${cfg.model} » introuvable")
                     code == 429 && free && msg.contains("limit: 0") ->
-                        "le modèle « ${cfg.model} » n'est pas gratuit : choisis-en un autre (ex. un modèle Flash)"
-                    code == 429 && free -> "limite gratuite atteinte, réessaie dans une minute"
+                        throw Overloaded("le modèle « ${cfg.model} » n'est pas gratuit sur ton compte", false)
+                    code == 429 && free ->
+                        throw Overloaded("limite gratuite atteinte, réessaie dans une minute", false)
                     code == 429 -> "trop de requêtes ou crédit épuisé"
                     else -> msg
                 }
