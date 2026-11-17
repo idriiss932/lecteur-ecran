@@ -1,6 +1,7 @@
 package com.example.lecteurecran
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.DashPathEffect
 import android.graphics.Paint
@@ -25,6 +26,7 @@ data class OcrBlock(val text: String, val rect: Rect, val lines: List<OcrLine>)
  */
 class PickerView(
     context: Context,
+    private val frozen: Bitmap,
     private val blocks: List<OcrBlock>,
     private val onRead: (text: String, rects: List<Rect>) -> Unit
 ) : View(context) {
@@ -60,7 +62,8 @@ class PickerView(
 
     override fun onDraw(canvas: Canvas) {
         getLocationOnScreen(loc)
-        canvas.drawColor(0x22000000)
+        // Image figée de l'écran : la page dessous peut bouger, le texte reste aligné
+        if (!frozen.isRecycled) canvas.drawBitmap(frozen, -loc[0].toFloat(), -loc[1].toFloat(), null)
         val r = 6 * dp
         for (b in blocks) {
             tmp.set(b.rect); tmp.offset(-loc[0].toFloat(), -loc[1].toFloat())

@@ -80,6 +80,7 @@ class OverlayService : Service() {
     private var pickerRoot: FrameLayout? = null
     private var picker: PickerView? = null
     private var pickerBlocks: List<OcrBlock> = emptyList()
+    private var pickerBitmap: Bitmap? = null
     private var busy = false
 
     // Voix
@@ -364,8 +365,7 @@ class OverlayService : Service() {
             recognizer.process(InputImage.fromBitmap(bmp, 0))
                 .addOnSuccessListener { result ->
                     busy = false
-                    bmp.recycle()
-                    showPicker(result)
+                    showPicker(result, bmp)
                 }
                 .addOnFailureListener {
                     busy = false
@@ -377,7 +377,7 @@ class OverlayService : Service() {
 
     // ---------------------------------------------------------------- calque de sélection
 
-    private fun showPicker(result: Text) {
+    private fun showPicker(result: Text, bmp: Bitmap) {
         val blocks = result.textBlocks.mapNotNull { b ->
             val r = b.boundingBox ?: return@mapNotNull null
             if (b.text.isBlank()) return@mapNotNull null
@@ -387,12 +387,14 @@ class OverlayService : Service() {
             )
         }
         if (blocks.isEmpty()) {
+            bmp.recycle()
             toast("Aucun texte détecté")
             return
         }
+        pickerBitmap = bmp
         pickerBlocks = blocks
 
-        val view = PickerView(this, blocks) { text, rects -> onPickerRead(text, rects) }
+        val view = PickerView(this, bmp, blocks) { text, rects -> onPickerRead(text, rects) }
         picker = view
 
         val root = FrameLayout(this)
@@ -453,6 +455,8 @@ class OverlayService : Service() {
         pickerRoot = null
         picker = null
         pickerBlocks = emptyList()
+        pickerBitmap?.recycle()
+        pickerBitmap = null
     }
 
     // ---------------------------------------------------------------- voix
@@ -495,6 +499,15 @@ class OverlayService : Service() {
         val r = t.setLanguage(loc)
         if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) {
             toast("Voix ${loc.displayLanguage} non installée (Paramètres > Synthèse vocale)")
+        }
+        val voiceName = prefs.getString("voice", null)
+        if (voiceName != null) {
+            val v = try {
+                t.voices?.firstOrNull { it.name == voiceName && it.locale.language == loc.language }
+            } catch (e: Exception) {
+                null
+            }
+            if (v != null) t.setVoice(v)
         }
         t.setSpeechRate(prefs.getFloat("rate", 1f))
     }
